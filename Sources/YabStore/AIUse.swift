@@ -76,7 +76,9 @@ public enum AIUse {
         defaults.set(level.rawValue, forKey: key)
         guard before != level else { return }
         NotificationCenter.default.post(name: changed, object: nil)
+        StallProbe.mark("AIUse.set.post.begin")
         NotificationCenter.default.post(name: AppleModelAccess.changed, object: nil)
+        StallProbe.mark("AIUse.set.post.end")
     }
 
     public static func setRowsHidden(_ hidden: Bool, in defaults: UserDefaults = Store.settings) {

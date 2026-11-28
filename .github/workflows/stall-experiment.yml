@@ -1,0 +1,167 @@
+# Temporary, for the full-suite stall experiment. Runs only on a push to
+# the experiment branch, in the fork it is pushed to (design and stopping
+# rules: research/ci-experiment/design.md in the coordinator's notes).
+#
+# - Trigger is `push` to this one branch: workflow_dispatch only fires for a
+#   workflow on the default branch, and the fork's main stays untouched.
+#   `gh run rerun` repeats a run with the same plan.
+# - No `concurrency`: GitHub's default lets runs of the same branch run side
+#   by side, so a second push never cancels the first.
+# - One build, saved in the cache under the sources' hash; every trial job
+#   restores it, so a later push that changes only the plan does not build.
+# - No secrets, read-only token, GitHub-hosted runners only, like ci.yml.
+
+name: Stall experiment
+
+on:
+  push:
+    branches: [chore/full-suite-ci-experiment]
+
+permissions:
+  contents: read
+
+env:
+  YAB_SIGN_IDENTITY: "-"
+
+jobs:
+  build:
+    name: Build the tests
+    runs-on: macos-26
+    # A fork starts with no cache: the first build is cold (CI's builds took
+    # 23-36 minutes with the previous commit's cache).
+    timeout-minutes: 150
+    outputs:
+      blocks: ${{ steps.plan.outputs.blocks }}
+      phase: ${{ steps.plan.outputs.phase }}
+      key: ${{ steps.key.outputs.key }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Plan
+        id: plan
+        run: |
+          echo "blocks=$(python3 scripts/stall-experiment/plan.py matrix)" >> "$GITHUB_OUTPUT"
+          echo "phase=$(python3 scripts/stall-experiment/plan.py phase)" >> "$GITHUB_OUTPUT"
+          cat scripts/stall-experiment/plan.env
+      - name: Toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+          sw_vers
+          sysctl -n hw.ncpu hw.activecpu hw.memsize machdep.cpu.brand_string
+      - name: Cache key
+        id: key
+        run: echo "key=stall-exp-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Package.swift', 'Package.resolved', 'Sources/**', 'Tests/**', 'YabCore/Client/**') }}" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@v4
+        id: cache
+        with:
+          path: .build
+          key: ${{ steps.key.outputs.key }}
+      - name: Build (what `swift test` builds)
+        if: steps.cache.outputs.cache-hit != 'true' && steps.plan.outputs.phase != 'ci-identical'
+        run: swift build --build-tests 2>&1 | tail -40
+        shell: bash -o pipefail {0}
+      - uses: actions/cache/save@v4
+        if: steps.cache.outputs.cache-hit != 'true' && steps.plan.outputs.phase != 'ci-identical'
+        with:
+          path: .build
+          key: ${{ steps.key.outputs.key }}
+
+  trials:
+    name: Block ${{ matrix.block }}
+    needs: build
+    runs-on: macos-26
+    # Each trial stops itself (trial.py); the steps below also stop starting
+    # trials 8 minutes before this, so every artifact is uploaded in time.
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        block: ${{ fromJSON(needs.build.outputs.blocks) }}
+    env:
+      OUT: ${{ github.workspace }}/stall-out
+      BLOCK: ${{ matrix.block }}
+      PHASE: ${{ needs.build.outputs.phase }}
+    steps:
+      - name: Job clock
+        run: |
+          echo "JOB_DEADLINE=$(( $(date +%s) + 52 * 60 ))" >> "$GITHUB_ENV"
+          mkdir -p "$OUT"
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/cache/restore@v4
+        if: env.PHASE != 'ci-identical'
+        with:
+          path: .build
+          key: ${{ needs.build.outputs.key }}
+          fail-on-cache-miss: true
+      # ci-identical: CI's full-suite job as it is, with the cache it would
+      # have restored (the build's), then `swift test` with its own build.
+      - uses: actions/cache/restore@v4
+        if: env.PHASE == 'ci-identical'
+        with:
+          path: .build
+          key: ${{ needs.build.outputs.key }}
+      - name: Runner
+        run: |
+          sw_vers; xcodebuild -version
+          sysctl -n hw.ncpu hw.activecpu vm.loadavg
+          ps -axo pid,%cpu,rss,command | sort -k2 -nr | head -15
+      - name: Preflight
+        if: env.PHASE != 'ci-identical'
+        run: bash scripts/stall-experiment/preflight.sh "$OUT/preflight"
+      - name: Trial 1
+        if: always()
+        run: bash scripts/stall-experiment/run-trial.sh 1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: b${{ matrix.block }}-1
+          path: stall-out/t1
+          if-no-files-found: ignore
+          retention-days: 30
+      - name: Trial 2
+        if: always()
+        run: bash scripts/stall-experiment/run-trial.sh 2
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: b${{ matrix.block }}-2
+          path: stall-out/t2
+          if-no-files-found: ignore
+          retention-days: 30
+      - name: Trial 3
+        if: always()
+        run: bash scripts/stall-experiment/run-trial.sh 3
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: b${{ matrix.block }}-3
+          path: stall-out/t3
+          if-no-files-found: ignore
+          retention-days: 30
+      - name: Trial 4
+        if: always()
+        run: bash scripts/stall-experiment/run-trial.sh 4
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: b${{ matrix.block }}-4
+          path: stall-out/t4
+          if-no-files-found: ignore
+          retention-days: 30
+      - name: Judge this block
+        if: always()
+        run: python3 scripts/stall-experiment/judge.py "$OUT"/t* | tee "$OUT/judge.tsv"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: b${{ matrix.block }}-preflight
+          path: |
+            stall-out/preflight/host-redacted.json
+            stall-out/preflight/preflight.log
+            stall-out/judge.tsv
+          if-no-files-found: ignore
+          retention-days: 30

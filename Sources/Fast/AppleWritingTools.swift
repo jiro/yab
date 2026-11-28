@@ -1,5 +1,6 @@
 import AppKit
 import WebKit
+import YabStore
 
 /// The existing Apple-model choice also controls the system's selection tools.
 @MainActor
@@ -36,6 +37,7 @@ final class AppleWritingTools {
         watchers.append(center.addObserver(forName: AppleModelAccess.changed, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.refresh() }
         })
+        StallProbe.mark("AppleWritingTools.observers")
     }
 
     deinit {

@@ -2,6 +2,7 @@ import AppKit
 import ImageIO
 import SwiftUI
 import UniformTypeIdentifiers
+import YabStore
 #if canImport(FoundationModels)
 import FoundationModels
 #endif
@@ -182,7 +183,7 @@ struct ChatComposer: View {
             .map { open, screen, who, rows in
                 "\(screen)|\(open?.id ?? "")|\(who?.address ?? "")|\(rows.count)|\(MailDesk.shared.split)|\(MailDesk.shared.query)"
             }
-            .removeDuplicates()) { mailShown = $0 }
+            .removeDuplicates()) { if !StallProbe.mail || mailShown != $0 { mailShown = $0 } }
         .onDisappear {
             if let presses { NSEvent.removeMonitor(presses) }
             presses = nil
