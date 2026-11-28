@@ -1,0 +1,90 @@
+# Temporary, for checking the full-suite stall fix on a fork before the pull
+# request. Runs only on a push to this one branch, in the fork it is pushed to.
+#
+# Every job is ci.yml's full-suite job: the same runner, the same cache step,
+# the same `swift test 2>&1 | tee swift-test.log` and the same 60-minute
+# timeout. Half the jobs check out this branch (the fix), half check out
+# origin/main 25f8339 (no fix), interleaved so each wave of runners gets both.
+# Two steps are added around `swift test`, and neither changes how it runs:
+# - Watch starts scripts/stall-check/watch.sh in the background: it records
+#   the log's growth, samples the swift-testing host, and stops the run at 55
+#   minutes so the log and samples are uploaded (a job that hits its timeout
+#   skips the upload steps).
+# - The upload keeps the watcher's files next to the log.
+# No secrets, read-only token, GitHub-hosted runners only, like ci.yml. No
+# `concurrency`, so the jobs of one push never cancel each other.
+
+name: Stall check
+
+on:
+  push:
+    branches: [chore/full-suite-stall-fix-check]
+
+permissions:
+  contents: read
+
+env:
+  YAB_SIGN_IDENTITY: "-"
+
+jobs:
+  full-suite:
+    name: Full swift test, ${{ matrix.version }} ${{ matrix.trial }}
+    runs-on: macos-26
+    timeout-minutes: 60
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { version: fixed, trial: 1 }
+          - { version: main, trial: 1 }
+          - { version: fixed, trial: 2 }
+          - { version: main, trial: 2 }
+          - { version: fixed, trial: 3 }
+          - { version: main, trial: 3 }
+          - { version: fixed, trial: 4 }
+          - { version: main, trial: 4 }
+          - { version: fixed, trial: 5 }
+          - { version: main, trial: 5 }
+          - { version: fixed, trial: 6 }
+          - { version: main, trial: 6 }
+    steps:
+      - name: Job clock
+        run: echo "STOP_AT=$(( $(date +%s) + 55 * 60 ))" >> "$GITHUB_ENV"
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Keep the watcher
+        run: cp scripts/stall-check/watch.sh "$RUNNER_TEMP/watch.sh"
+      - name: Check out main for the version without the fix
+        if: matrix.version == 'main'
+        run: |
+          git fetch --no-tags --depth=1 origin 25f8339a00a38a4fc5b2a6e018c267d5927911f7
+          git checkout --detach FETCH_HEAD
+      - name: Which code
+        run: |
+          git log -1 --format='%H %s'
+          git diff --stat 25f8339a00a38a4fc5b2a6e018c267d5927911f7 -- Sources Tests
+          sw_vers; xcodebuild -version; sysctl -n hw.ncpu hw.activecpu
+      - uses: actions/cache@v4
+        with:
+          path: .build
+          key: spm-test-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Package.swift', 'Package.resolved') }}-${{ github.sha }}
+          restore-keys: |
+            spm-test-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Package.swift', 'Package.resolved') }}-
+      - name: Watch
+        run: nohup bash "$RUNNER_TEMP/watch.sh" swift-test.log stall-watch > stall-watch.out 2>&1 &
+      - name: All tests
+        shell: bash -o pipefail {0}
+        run: swift test 2>&1 | tee swift-test.log
+      - name: Keep the log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.version }}-${{ matrix.trial }}
+          path: |
+            swift-test.log
+            stall-watch
+            stall-watch.out
+          retention-days: 7
+          if-no-files-found: ignore
