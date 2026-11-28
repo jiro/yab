@@ -21,8 +21,9 @@ Records, in OUT:
   xctest.log     the XCTest half
 
 Sampling is anchored to the host's start (60, 120, 180 s) and to silence
-(no completion for 90, 150, 210 s). The host is stopped after 240 s with no
-completion, or 480 s after it started, or at the job's deadline.
+(no completion for 90, 150, 210 s, counted again for each new silence), at
+most 9 samples, none after the job's deadline. The host is stopped after
+240 s with no completion, or 480 s after it started, or at the deadline.
 
 With --via-swift-test the trial is CI's step itself, `swift test` with its
 build, its buffered output and its own exit status (the fallback when the
@@ -52,19 +53,78 @@ CONDITIONS = {
 ANCHORED = (60, 120, 180)
 QUIET_SAMPLES = (90, 150, 210)
 KILL_QUIET = 240
+MAX_SAMPLES = 9
 MAX_SECS = 480
 XCTEST_MAX = 300
 DONE = re.compile(r"(passed|failed) after [0-9.]+ seconds|\) skipped")
 ENDED = ("testEnded", "testCaseEnded", "testSkipped")
 
 
-def sh(cmd, path, timeout=60):
-    t = time.time()
+def processes():
+    """pid -> (ppid, command) for every process."""
+    rows = subprocess.run(["ps", "-axo", "pid=,ppid=,command="], capture_output=True, text=True).stdout.splitlines()
+    table = {}
+    for r in rows:
+        parts = r.split(None, 2)
+        if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+            table[int(parts[0])] = (int(parts[1]), parts[2] if len(parts) == 3 else "")
+    return table
+
+
+def descendants(root, table=None):
+    table = table or processes()
+    kids = {}
+    for pid, (ppid, _) in table.items():
+        kids.setdefault(ppid, []).append(pid)
+    out, todo = [], list(kids.get(root, []))
+    while todo:
+        p = todo.pop()
+        out.append(p)
+        todo += kids.get(p, [])
+    return out
+
+
+def stop_tree(root, grace=10):
+    """SIGTERM root and every descendant, then SIGKILL what is left.
+    By parent, not by process group: SwiftPM starts xctest and the
+    swift-testing host in process groups of their own."""
+    pids = [root] + descendants(root)
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        for p in pids:
+            try:
+                os.kill(p, sig)
+            except (ProcessLookupError, PermissionError):
+                pass
+        end = time.time() + (grace if sig == signal.SIGTERM else 2)
+        while time.time() < end and any(alive(p) for p in pids):
+            time.sleep(0.5)
+    return [p for p in pids if alive(p)]
+
+
+def alive(pid):
     try:
-        r = subprocess.run(cmd, stdout=open(path, "w"), stderr=subprocess.STDOUT, timeout=timeout)
-        rc = r.returncode
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    # A zombie counts as gone. Not reaped here: the caller's Popen.wait must
+    # still read the host's own exit status.
+    stat = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+    return bool(stat) and not stat.startswith("Z")
+
+
+def sh(cmd, path, timeout=60, env=None):
+    """Runs cmd; on timeout cmd and everything it started go (an xctest
+    child would otherwise keep loading the runner)."""
+    t = time.time()
+    p = subprocess.Popen(cmd, stdout=open(path, "w"), stderr=subprocess.STDOUT, env=env, start_new_session=True)
+    try:
+        rc = p.wait(timeout=max(1, timeout))
     except subprocess.TimeoutExpired:
         rc = "timeout"
+        stop_tree(p.pid, grace=5)
+        p.wait()
     return rc, round(time.time() - t, 1)
 
 
@@ -89,14 +149,15 @@ def count_events(path, state):
     return state["ended"]
 
 
-def take_sample(out, n, pid, why, t, quiet, finished):
+def take_sample(out, n, pid, why, t, quiet, finished, limit=120):
+    """limit: seconds this sample may take (less near the job's deadline)."""
     path = os.path.join(out, f"sample-{n}.txt")
     rec = {"n": n, "why": why, "t": t, "quiet": quiet, "finished": finished, "wall": time.time()}
-    rc, secs = sh(["sample", str(pid), "3", "-mayDie", "-file", path], os.path.join(out, f"sample-{n}.out"), 120)
-    if rc != 0 or not os.path.exists(path) or os.path.getsize(path) == 0:
+    rc, secs = sh(["sample", str(pid), "3", "-mayDie", "-file", path], os.path.join(out, f"sample-{n}.out"), limit)
+    if rc != "timeout" and (rc != 0 or not os.path.exists(path) or os.path.getsize(path) == 0) and limit - secs > 10:
         # A hardened host may refuse task_for_pid to its own user; the
         # runner's user can sudo without a password.
-        rc, secs2 = sh(["sudo", "-n", "sample", str(pid), "3", "-mayDie", "-file", path], os.path.join(out, f"sample-{n}.out"), 120)
+        rc, secs2 = sh(["sudo", "-n", "sample", str(pid), "3", "-mayDie", "-file", path], os.path.join(out, f"sample-{n}.out"), limit - secs)
         rec["sudo"] = True
         secs += secs2
     rec.update(rc=rc, secs=secs, bytes=os.path.getsize(path) if os.path.exists(path) else 0)
@@ -107,20 +168,11 @@ def take_sample(out, n, pid, why, t, quiet, finished):
 
 def find_host(root):
     """The swift-testing host among root's descendants, or None."""
-    rows = subprocess.run(["ps", "-axo", "pid=,ppid=,command="], capture_output=True, text=True).stdout.splitlines()
-    kids, cmd = {}, {}
-    for r in rows:
-        parts = r.split(None, 2)
-        if len(parts) == 3 and parts[0].isdigit():
-            kids.setdefault(int(parts[1]), []).append(int(parts[0]))
-            cmd[int(parts[0])] = parts[2]
-    todo = list(kids.get(root, []))
-    while todo:
-        p = todo.pop()
-        c = cmd.get(p, "")
+    table = processes()
+    for p in descendants(root, table):
+        c = table.get(p, (0, ""))[1]
         if "swiftpm-testing-helper" in c and "--testing-library swift-testing" in c and "Fast" in c:
             return p
-        todo += kids.get(p, [])
     return None
 
 
@@ -143,7 +195,9 @@ def main():
     if a.via_swift_test:
         a.no_xctest = True
     probe = f"ci-b{a.block}-p{a.pos}"
-    meta = {"cond": a.cond, "block": a.block, "pos": a.pos, "skip": cond["skip"], "fix": cond["fix"], "probe": probe,
+    # A rerun of a run keeps its block numbers; the run and attempt tell them apart.
+    run = f"{os.environ.get('GITHUB_RUN_ID', 'local')}.{os.environ.get('GITHUB_RUN_ATTEMPT', '1')}"
+    meta = {"cond": a.cond, "block": a.block, "pos": a.pos, "run": run, "skip": cond["skip"], "fix": cond["fix"], "probe": probe,
             "start": time.time(), "load_start": load(), "ncpu": os.cpu_count(), "samples": [],
             "anchored": ANCHORED, "quiet_samples": QUIET_SAMPLES, "kill_quiet": KILL_QUIET, "max_secs": a.max_secs}
 
@@ -154,7 +208,10 @@ def main():
     env.update(YAB_PROBE=probe, NO_COLOR="1")
     if not a.no_xctest:
         # The XCTest half, as `swift test` runs it before swift-testing.
-        rc, secs = sh(["swift", "test", "--skip-build", "--disable-swift-testing"], os.path.join(out, "xctest.log"), XCTEST_MAX)
+        # In the trial's own world too, so swift-testing starts on what
+        # XCTest left, as under CI's `swift test`.
+        limit = min(XCTEST_MAX, a.deadline - time.time() - 60) if a.deadline else XCTEST_MAX
+        rc, secs = sh(["swift", "test", "--skip-build", "--disable-swift-testing"], os.path.join(out, "xctest.log"), limit, env)
         meta["xctest"] = {"rc": rc, "secs": secs}
         save()
 
@@ -164,6 +221,9 @@ def main():
     if a.via_swift_test:
         argv = ["swift", "test", "--skip", cond["skip"]] + stream
         henv = dict(env)
+        # SwiftPM reports the host's status as its own: a signal by number,
+        # any other failure as 1.
+        meta["exit_source"] = "swift test"
     else:
         hargs = host["arguments"]
         binary = hargs[2]
@@ -221,6 +281,8 @@ def main():
         key = (finished[0], count_events(events, estate))
         if key != last_key:
             last_key, last_change = key, now
+            # A new silence gets its own quiet samples.
+            quiet_taken = list(QUIET_SAMPLES)
         quiet = round(now - last_change)
         max_quiet = max(max_quiet, quiet)
         progress.write(f"{t}\t{key[0]}\t{key[1]}\t{quiet}\t{load()}\n")
@@ -235,9 +297,13 @@ def main():
             anchored.pop(0)
         while quiet_taken and quiet >= quiet_taken[0]:
             quiet_taken.pop(0)
-        if why and proc.poll() is None:
+        if a.deadline and now >= a.deadline:
+            reason = "deadline"
+            break
+        if why and proc.poll() is None and n < MAX_SAMPLES:
             n += 1
-            meta["samples"].append(take_sample(out, n, host_pid, why, t, quiet, list(key)))
+            limit = min(120, a.deadline - now) if a.deadline else 120
+            meta["samples"].append(take_sample(out, n, host_pid, why, t, quiet, list(key), limit))
             save()
             continue
         if quiet >= KILL_QUIET:
@@ -246,23 +312,17 @@ def main():
         if t >= a.max_secs:
             reason = f"max {a.max_secs}s"
             break
-        if a.deadline and now >= a.deadline:
-            reason = "deadline"
-            break
     if proc.poll() is None:
         meta["stopped_at"] = time.time()
-        os.killpg(proc.pid, signal.SIGTERM)
-        try:
-            proc.wait(10)
-        except subprocess.TimeoutExpired:
-            os.killpg(proc.pid, signal.SIGKILL)
-            proc.wait()
+        meta["left_after_stop"] = stop_tree(proc.pid)
+        proc.wait()
     th.join(5)
     end = time.time()
     count_events(events, estate)
     meta.update(end=end, seconds=round(end - t0, 1), exit=proc.returncode, reason=reason, max_quiet=max_quiet,
                 console_finished=finished[0], events_ended=estate["ended"], load_end=load())
-    # Whatever the host left running in its session (child processes of tests).
+    # Whatever the host left running in its session (child processes of
+    # tests, reparented once the host is gone).
     left = subprocess.run(["pgrep", "-g", str(proc.pid)], capture_output=True, text=True).stdout.split()
     meta["left_in_session"] = left
     for p in left:

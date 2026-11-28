@@ -6,8 +6,9 @@
 # so and the trials run without it.
 #
 # host.json holds the step's whole environment and stays on the runner.
-# host-redacted.json, for the artifact, leaves out values whose names look
-# like credentials.
+# host-redacted.json, for the artifact, keeps every name but only the values
+# of an allowlist (the toolchain's, the runner image's, Yab's switches): a
+# denylist of credential-looking names let through names like BITRISE_PAT.
 #
 # Usage: preflight.sh OUT_DIR   (from the package directory, after a build)
 set -uo pipefail
@@ -33,8 +34,9 @@ full, redacted, version = sys.argv[1], sys.argv[2], sys.argv[3]
 d = json.load(open(full))
 d["event_stream_version"] = version or None
 json.dump(d, open(full, "w"), indent=1, sort_keys=True)
-secret = re.compile(r"TOKEN|SECRET|PASSWORD|CREDENTIAL|_KEY$|^ACTIONS_|^GITHUB_", re.I)
-d["environment"] = {k: ("<redacted>" if secret.search(k) else v) for k, v in d["environment"].items()}
+keep = re.compile(r"^(DYLD_\w+|SDKROOT|NO_COLOR|LIBRARY_PATH|CPATH|PATH|TMPDIR|HOME|USER|LANG|LC_\w+|DEVELOPER_DIR"
+                  r"|SWT_\w+|SWIFT\w*|XCTest\w*|YAB_\w+|CI|RUNNER_OS|RUNNER_ARCH|ImageOS|ImageVersion)$")
+d["environment"] = {k: (v if keep.match(k) else "<not kept>") for k, v in d["environment"].items()}
 json.dump(d, open(redacted, "w"), indent=1, sort_keys=True)
 a = d["arguments"]
 print("host:", a[0])

@@ -1,20 +1,24 @@
 #!/usr/bin/env python3
 """Reads plan.env and says which trials a job runs.
 
-  plan.py matrix          JSON list of block numbers, for the workflow matrix
+  plan.py matrix          JSON list of jobs for the workflow matrix: block
+                          numbers, or "BLOCK.K" when TRIALS_PER_JOB=1 (the
+                          job runs only trial K of that block)
   plan.py phase           the phase
-  plan.py cond BLOCK POS  the condition of trial POS (1-based) in BLOCK, or
-                          nothing when the block has no such trial
+  plan.py cond JOB POS    the condition of trial POS (1-based) of that job,
+                          or nothing when it has no such trial
 
-compare rotates A, B, M, BM by block, so over every 4 blocks each condition
-is first, second, third and last once (position is a covariate: later
-trials in a job follow a killed one).
+compare orders A, B, M, BM by a Williams square: over every 4 blocks each
+condition is in each position once, and each condition follows each other
+condition once, so a carryover from the trial before (later trials in a job
+follow one that may have been killed) does not fall on one condition.
 """
 import json
 import os
 import sys
 
-ORDER = ["A", "B", "M", "BM"]
+# Williams square for 4 conditions: rows are the orders of blocks 1-4, 5-8...
+WILLIAMS = [["A", "B", "BM", "M"], ["B", "M", "A", "BM"], ["M", "BM", "B", "A"], ["BM", "A", "M", "B"]]
 
 
 def plan():
@@ -32,8 +36,7 @@ def conds(p, block):
     if phase == "shape":
         return ["A"] * n
     if phase == "compare":
-        r = (block - 1) % len(ORDER)
-        return ORDER[r:] + ORDER[:r]
+        return list(WILLIAMS[(block - 1) % len(WILLIAMS)])
     if phase == "ci-identical":
         return ["A"]
     raise SystemExit(f"unknown PHASE {phase}")
@@ -44,10 +47,19 @@ if __name__ == "__main__":
     cmd = sys.argv[1]
     if cmd == "matrix":
         first = int(p.get("FIRST_BLOCK", "1"))
-        print(json.dumps(list(range(first, first + int(p["BLOCKS"])))))
+        blocks = range(first, first + int(p["BLOCKS"]))
+        if p.get("TRIALS_PER_JOB") == "1" and p["PHASE"] == "compare":
+            print(json.dumps([f"{b}.{k}" for b in blocks for k in range(1, len(WILLIAMS[0]) + 1)]))
+        else:
+            print(json.dumps([str(b) for b in blocks]))
     elif cmd == "phase":
         print(p["PHASE"])
     elif cmd == "cond":
-        block, pos = int(sys.argv[2]), int(sys.argv[3])
-        c = conds(p, block)
-        print(c[pos - 1] if pos <= len(c) else "")
+        job, pos = sys.argv[2], int(sys.argv[3])
+        if "." in job:
+            block, only = (int(x) for x in job.split("."))
+            c = conds(p, block)
+            print(c[only - 1] if pos == 1 else "")
+        else:
+            c = conds(p, int(job))
+            print(c[pos - 1] if pos <= len(c) else "")

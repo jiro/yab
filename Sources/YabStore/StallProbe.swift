@@ -7,8 +7,9 @@ import Foundation
 // YAB_FIX_COMPOSER=mail  ChatComposer writes mailShown only when the key
 //                        differs (condition M).
 // YAB_CI_MARKS=<path>    one line per mark: wall-clock seconds, the mark,
-//                        whether it ran on the main thread, and the
-//                        thread's Mach port (to pair begin and end). Written
+//                        whether it ran on the main thread, the thread's
+//                        Mach port (to pair begin and end) and the process
+//                        (the XCTest half writes marks too). Written
 //                        with write(2), unbuffered, so a line is on disk
 //                        even when the process stalls or is killed.
 public enum StallProbe {
@@ -30,7 +31,7 @@ public enum StallProbe {
         gettimeofday(&now, nil)
         let seconds = Double(now.tv_sec) + Double(now.tv_usec) / 1_000_000
         let thread = pthread_mach_thread_np(pthread_self())
-        let line = "\(seconds)\t\(what)\t\(Thread.isMainThread ? "main" : "other")\t\(thread)\n"
+        let line = "\(seconds)\t\(what)\t\(Thread.isMainThread ? "main" : "other")\t\(thread)\t\(getpid())\n"
         line.withCString { _ = write(marks, $0, strlen($0)) }
     }
 }
