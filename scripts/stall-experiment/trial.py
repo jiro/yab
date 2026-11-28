@@ -161,8 +161,9 @@ def take_sample(out, n, pid, why, t, quiet, finished, limit=120):
         rec["sudo"] = True
         secs += secs2
     rec.update(rc=rc, secs=secs, bytes=os.path.getsize(path) if os.path.exists(path) else 0)
-    sh(["ps", "-axo", "pid,ppid,pgid,stat,%cpu,rss,etime,command"], os.path.join(out, f"ps-{n}.txt"))
-    sh(["ps", "-M", "-p", str(pid)], os.path.join(out, f"threads-{n}.txt"))
+    rest = max(1, min(20, limit - secs))
+    sh(["ps", "-axo", "pid,ppid,pgid,stat,%cpu,rss,etime,command"], os.path.join(out, f"ps-{n}.txt"), rest)
+    sh(["ps", "-M", "-p", str(pid)], os.path.join(out, f"threads-{n}.txt"), rest)
     return rec
 
 

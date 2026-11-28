@@ -246,7 +246,9 @@ def judge(run):
             open_posts.pop(thread, None)
     waited = list(open_posts.values())
     ends = [en.get(x) for x in AIUSE]
-    have_marks = os.path.exists(os.path.join(run, "marks.tsv"))
+    # No line from this host (no post, no observer, no switch read) means
+    # the marks say nothing about this run, not that the cycle was impossible.
+    have_marks = bool(mk)
     impossible = have_marks and (not waited) and (observer is None or all(e is not None and e < observer for e in ends))
 
     # SyncKitTests: how many started, how many ended, the last end.
