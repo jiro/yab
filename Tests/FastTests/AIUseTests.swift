@@ -10,6 +10,7 @@ import Testing
 /// model, the ⌘T commands and ⌘K on an Ask row, and Set up Yab's Connect row.
 /// Every test is synchronous on the main actor, so the settings it sets
 /// are put back before any other test reads them.
+@MainActor
 struct AIUseTests {
     // MARK: - the rule
 

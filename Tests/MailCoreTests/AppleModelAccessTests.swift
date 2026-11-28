@@ -2,6 +2,7 @@ import Foundation
 import Testing
 import YabStore
 
+@MainActor
 struct AppleModelAccessTests {
     private func withDefaults(_ run: (UserDefaults, String) throws -> Void) throws {
         let suite = "apple-model-access-" + UUID().uuidString
