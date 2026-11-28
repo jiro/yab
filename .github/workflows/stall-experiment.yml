@@ -121,7 +121,7 @@ jobs:
           name: b${{ matrix.block }}-1
           path: stall-out/t1
           if-no-files-found: ignore
-          retention-days: 30
+          retention-days: 3
       - name: Trial 2
         if: always()
         run: bash scripts/stall-experiment/run-trial.sh 2
@@ -131,7 +131,7 @@ jobs:
           name: b${{ matrix.block }}-2
           path: stall-out/t2
           if-no-files-found: ignore
-          retention-days: 30
+          retention-days: 3
       - name: Trial 3
         if: always()
         run: bash scripts/stall-experiment/run-trial.sh 3
@@ -141,7 +141,7 @@ jobs:
           name: b${{ matrix.block }}-3
           path: stall-out/t3
           if-no-files-found: ignore
-          retention-days: 30
+          retention-days: 3
       - name: Trial 4
         if: always()
         run: bash scripts/stall-experiment/run-trial.sh 4
@@ -151,7 +151,7 @@ jobs:
           name: b${{ matrix.block }}-4
           path: stall-out/t4
           if-no-files-found: ignore
-          retention-days: 30
+          retention-days: 3
       - name: Judge this block
         if: always()
         run: python3 scripts/stall-experiment/judge.py "$OUT"/t* | tee "$OUT/judge.tsv"
@@ -164,4 +164,4 @@ jobs:
             stall-out/preflight/preflight.log
             stall-out/judge.tsv
           if-no-files-found: ignore
-          retention-days: 30
+          retention-days: 3
